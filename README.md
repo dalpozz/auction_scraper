@@ -1,13 +1,13 @@
 # Auction Scraper
 
-Scrapes apartment auctions from astalegale.net for the city of Turin.
+Scrapes apartment auctions from astalegale.net for Italian cities.
 
-## Filters
+## Features
 
-- Location: Turin (Torino), Italy
-- Max budget: €100,000
-- Auction date: within next 3 months
+- Filters by city, budget, and auction date range
+- Detects Turin neighborhoods (zone) from addresses
 - Excludes past auctions
+- Outputs results to CSV
 
 ## Setup
 
@@ -21,20 +21,37 @@ poetry install
 poetry run python scraper.py
 ```
 
-Results are saved to `auctions_torino.json`.
+### Options
 
-## Configuration
-
-Edit `scraper.py` to change filters:
-
-```python
-scraper = AstaLegaleScraper(
-    max_budget=100000,    # Maximum price in EUR
-    city="torino",        # City name
-    months_ahead=3,       # Months to look ahead
-)
+```
+--budget BUDGET   Maximum budget in EUR (default: 150000)
+--city CITY       City to search (default: torino)
+--months MONTHS   Months ahead to search (default: 3)
+--output OUTPUT   Output CSV file (default: auctions_torino.csv)
 ```
 
-## Limitations
+### Examples
 
-astalegale.net is JavaScript-rendered (Nuxt.js). The current implementation uses HTTP requests which may not capture dynamically loaded content. For full functionality, install Chrome/Chromium and the scraper will use Selenium automatically.
+```bash
+# Search with default settings (Turin, €150k, 3 months)
+poetry run python scraper.py
+
+# Search with €80k budget
+poetry run python scraper.py --budget 80000
+
+# Search 6 months ahead, save to custom file
+poetry run python scraper.py --months 6 --output results.csv
+```
+
+## Output
+
+Results are saved to CSV with columns:
+- address
+- zone (Turin neighborhood)
+- property_type
+- auction_date
+- base_price
+- tribunal
+- reference
+- url
+- description
