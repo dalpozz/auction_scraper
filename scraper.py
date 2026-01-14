@@ -22,6 +22,7 @@ class Auction:
     """Represents an auction listing"""
     title: str
     address: str
+    quartiere: str
     description: str
     tribunal: str
     auction_date: Optional[datetime]
@@ -29,6 +30,62 @@ class Auction:
     url: str
     reference: str
     property_type: str
+
+
+# Turin neighborhoods mapped by street/area keywords
+TORINO_QUARTIERI = {
+    # Centro
+    "centro": ["piazza castello", "via roma", "via po", "piazza san carlo", "via garibaldi", "piazza vittorio"],
+    "crocetta": ["crocetta", "via massena", "corso duca degli abruzzi", "politecnico"],
+    "san salvario": ["san salvario", "via nizza", "via madama cristina", "via ormea"],
+    "vanchiglia": ["vanchiglia", "lungo po", "corso san maurizio"],
+    
+    # Nord
+    "barriera di milano": ["barriera di milano", "via cigna", "corso vercelli", "via bologna", "via leinì"],
+    "rebaudengo": ["rebaudengo", "corso grosseto"],
+    "falchera": ["falchera"],
+    "madonna di campagna": ["madonna di campagna", "via stradella"],
+    "lanzo": ["via lanzo"],
+    "borgata vittoria": ["borgata vittoria", "corso grosseto"],
+    "lucento": ["lucento", "via pianezza"],
+    "vallette": ["vallette", "via dei mughetti"],
+    "venaria": ["via venaria", "via venarìa"],
+    
+    # Sud  
+    "lingotto": ["lingotto", "via nizza", "corso unione sovietica"],
+    "mirafiori": ["mirafiori", "corso unione sovietica", "strada del drosso"],
+    "santa rita": ["santa rita", "via tripoli", "via gorizia"],
+    "pozzo strada": ["pozzo strada", "corso francia"],
+    "parella": ["parella", "via servais"],
+    
+    # Est
+    "aurora": ["aurora", "corso giulio cesare", "via cuneo", "porta palazzo"],
+    "borgo po": ["borgo po", "corso moncalieri", "gran madre"],
+    "madonna del pilone": ["madonna del pilone", "corso casale"],
+    "sassi": ["sassi", "piazza sassi"],
+    "superga": ["superga", "strada di superga"],
+    
+    # Ovest
+    "san paolo": ["san paolo", "via di nanni", "via cibrario"],
+    "cenisia": ["cenisia", "via cibrario", "corso francia"],
+    "cit turin": ["cit turin", "corso francia", "via duchessa jolanda"],
+    "campidoglio": ["campidoglio", "via cibrario"],
+    "borgo san paolo": ["borgo san paolo", "via monginevro"],
+    
+    # Colline
+    "collina": ["strada del mainero", "strada comunale", "collina", "precollina"],
+    "gran madre": ["gran madre", "piazza gran madre"],
+    
+    # Altri
+    "moncalieri": ["moncalieri"],
+    "nichelino": ["nichelino"],
+    "rivoli": ["rivoli"],
+    "grugliasco": ["grugliasco"],
+    "collegno": ["collegno"],
+    "settimo": ["settimo"],
+    "san mauro": ["san mauro"],
+    "chieri": ["chieri", "riva presso chieri"],
+}
 
 
 class AstaLegaleScraper:
@@ -88,6 +145,17 @@ class AstaLegaleScraper:
             return match.group(1).strip()
         return "Unknown"
     
+    def _detect_quartiere(self, address: str, description: str = "") -> str:
+        """Detect Turin neighborhood from address and description"""
+        text = f"{address} {description}".lower()
+        
+        for quartiere, keywords in TORINO_QUARTIERI.items():
+            for keyword in keywords:
+                if keyword in text:
+                    return quartiere.title()
+        
+        return ""
+    
     def _extract_address_from_title(self, title: str) -> str:
         """Extract address from title (first part before ' - Lotto')"""
         parts = title.split(" - Lotto")
@@ -132,13 +200,18 @@ class AstaLegaleScraper:
         tribunal = self._extract_tribunal(title)
         reference = self._extract_reference(title)
         
+        # Detect neighborhood
+        desc_text = description.split(" - Tipologia:")[0].strip()
+        quartiere = self._detect_quartiere(address, desc_text)
+        
         if base_price is None:
             return None
         
         return Auction(
             title=title,
             address=address,
-            description=description.split(" - Tipologia:")[0].strip(),
+            quartiere=quartiere,
+            description=desc_text,
             tribunal=tribunal,
             auction_date=auction_date,
             base_price=base_price,
@@ -219,6 +292,8 @@ class AstaLegaleScraper:
         
         for i, auction in enumerate(auctions, 1):
             print(f"\n[{i}] {auction.address}")
+            if auction.quartiere:
+                print(f"    Quartiere: {auction.quartiere}")
             print(f"    Type: {auction.property_type}")
             if auction.auction_date:
                 print(f"    Auction Date: {auction.auction_date.strftime('%d/%m/%Y')}")
@@ -232,11 +307,12 @@ class AstaLegaleScraper:
         """Save results to CSV file"""
         with open(filename, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["address", "property_type", "auction_date", "base_price", "tribunal", "reference", "url", "description"])
+            writer.writerow(["address", "quartiere", "property_type", "auction_date", "base_price", "tribunal", "reference", "url", "description"])
             
             for a in auctions:
                 writer.writerow([
                     a.address,
+                    a.quartiere,
                     a.property_type,
                     a.auction_date.strftime("%d/%m/%Y") if a.auction_date else "",
                     a.base_price,
