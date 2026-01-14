@@ -7,7 +7,7 @@ Filters auctions in the next 3 months, excludes past auctions
 Uses the RSS feed endpoint for reliable data extraction.
 """
 
-import json
+import csv
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -228,23 +228,24 @@ class AstaLegaleScraper:
             print(f"    Ref: {auction.reference}")
             print(f"    URL: {auction.url}")
     
-    def save_results(self, auctions: list[Auction], filename: str = "auctions_torino.json") -> None:
-        """Save results to JSON file"""
-        output = []
-        for a in auctions:
-            output.append({
-                "address": a.address,
-                "property_type": a.property_type,
-                "description": a.description,
-                "tribunal": a.tribunal,
-                "auction_date": a.auction_date.strftime("%d/%m/%Y") if a.auction_date else None,
-                "base_price": a.base_price,
-                "reference": a.reference,
-                "url": a.url,
-            })
+    def save_results(self, auctions: list[Auction], filename: str = "auctions_torino.csv") -> None:
+        """Save results to CSV file"""
+        with open(filename, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["address", "property_type", "auction_date", "base_price", "tribunal", "reference", "url", "description"])
+            
+            for a in auctions:
+                writer.writerow([
+                    a.address,
+                    a.property_type,
+                    a.auction_date.strftime("%d/%m/%Y") if a.auction_date else "",
+                    a.base_price,
+                    a.tribunal,
+                    a.reference,
+                    a.url,
+                    a.description,
+                ])
         
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(output, f, ensure_ascii=False, indent=2)
         print(f"\nResults saved to {filename}")
 
 
