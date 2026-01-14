@@ -22,7 +22,7 @@ class Auction:
     """Represents an auction listing"""
     title: str
     address: str
-    quartiere: str
+    zone: str
     description: str
     tribunal: str
     auction_date: Optional[datetime]
@@ -33,7 +33,7 @@ class Auction:
 
 
 # Turin neighborhoods mapped by street/area keywords
-TORINO_QUARTIERI = {
+TORINO_ZONES = {
     # Centro
     "centro": ["piazza castello", "via roma", "via po", "piazza san carlo", "via garibaldi", "piazza vittorio"],
     "crocetta": ["crocetta", "via massena", "corso duca degli abruzzi", "politecnico"],
@@ -94,7 +94,7 @@ class AstaLegaleScraper:
     BASE_URL = "https://www.astalegale.net"
     RSS_URL = "https://www.astalegale.net/Immobili/Rss"
     
-    def __init__(self, max_budget: float = 100000, city: str = "torino", months_ahead: int = 3):
+    def __init__(self, max_budget: float = 150000, city: str = "torino", months_ahead: int = 3):
         self.max_budget = max_budget
         self.city = city.lower()
         self.months_ahead = months_ahead
@@ -145,14 +145,14 @@ class AstaLegaleScraper:
             return match.group(1).strip()
         return "Unknown"
     
-    def _detect_quartiere(self, address: str, description: str = "") -> str:
+    def _detect_zone(self, address: str, description: str = "") -> str:
         """Detect Turin neighborhood from address and description"""
         text = f"{address} {description}".lower()
         
-        for quartiere, keywords in TORINO_QUARTIERI.items():
+        for zone, keywords in TORINO_ZONES.items():
             for keyword in keywords:
                 if keyword in text:
-                    return quartiere.title()
+                    return zone.title()
         
         return ""
     
@@ -202,7 +202,7 @@ class AstaLegaleScraper:
         
         # Detect neighborhood
         desc_text = description.split(" - Tipologia:")[0].strip()
-        quartiere = self._detect_quartiere(address, desc_text)
+        zone = self._detect_zone(address, desc_text)
         
         if base_price is None:
             return None
@@ -210,7 +210,7 @@ class AstaLegaleScraper:
         return Auction(
             title=title,
             address=address,
-            quartiere=quartiere,
+            zone=zone,
             description=desc_text,
             tribunal=tribunal,
             auction_date=auction_date,
@@ -292,8 +292,8 @@ class AstaLegaleScraper:
         
         for i, auction in enumerate(auctions, 1):
             print(f"\n[{i}] {auction.address}")
-            if auction.quartiere:
-                print(f"    Quartiere: {auction.quartiere}")
+            if auction.zone:
+                print(f"    Zone: {auction.zone}")
             print(f"    Type: {auction.property_type}")
             if auction.auction_date:
                 print(f"    Auction Date: {auction.auction_date.strftime('%d/%m/%Y')}")
@@ -307,12 +307,12 @@ class AstaLegaleScraper:
         """Save results to CSV file"""
         with open(filename, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["address", "quartiere", "property_type", "auction_date", "base_price", "tribunal", "reference", "url", "description"])
+            writer.writerow(["address", "zone", "property_type", "auction_date", "base_price", "tribunal", "reference", "url", "description"])
             
             for a in auctions:
                 writer.writerow([
                     a.address,
-                    a.quartiere,
+                    a.zone,
                     a.property_type,
                     a.auction_date.strftime("%d/%m/%Y") if a.auction_date else "",
                     a.base_price,
@@ -328,7 +328,6 @@ class AstaLegaleScraper:
 def main():
     """Main entry point"""
     scraper = AstaLegaleScraper(
-        max_budget=100000,
         city="torino",
         months_ahead=3,
     )
