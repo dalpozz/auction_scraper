@@ -327,16 +327,27 @@ class AstaLegaleScraper:
 
 def main():
     """Main entry point"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Scrape apartment auctions from astalegale.net")
+    parser.add_argument("--budget", type=float, default=150000, help="Maximum budget in EUR (default: 150000)")
+    parser.add_argument("--city", type=str, default="torino", help="City to search (default: torino)")
+    parser.add_argument("--months", type=int, default=3, help="Months ahead to search (default: 3)")
+    parser.add_argument("--output", type=str, default="auctions_torino.csv", help="Output CSV file (default: auctions_torino.csv)")
+    
+    args = parser.parse_args()
+    
     scraper = AstaLegaleScraper(
-        city="torino",
-        months_ahead=3,
+        max_budget=args.budget,
+        city=args.city,
+        months_ahead=args.months,
     )
     
     auctions = scraper.scrape()
     scraper.print_results(auctions)
     
     if auctions:
-        scraper.save_results(auctions)
+        scraper.save_results(auctions, args.output)
 
 
 if __name__ == "__main__":
