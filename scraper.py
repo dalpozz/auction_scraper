@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
 Auction scraper for astalegale.net
-Searches for apartments in Turin with budget <= 100,000 EUR
-Filters auctions in the next 3 months, excludes past auctions
+Searches for apartments with configurable budget and location filters.
+Filters auctions in the next N months, excludes past auctions.
 
 Uses the RSS feed endpoint for reliable data extraction.
+Uses OpenStreetMap Nominatim API for zone/neighborhood detection.
 """
 
 import csv
 import re
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -32,60 +34,61 @@ class Auction:
     property_type: str
 
 
-# Turin neighborhoods mapped by street/area keywords
-TORINO_ZONES = {
-    # Centro
-    "centro": ["piazza castello", "via roma", "via po", "piazza san carlo", "via garibaldi", "piazza vittorio"],
-    "crocetta": ["crocetta", "via massena", "corso duca degli abruzzi", "politecnico"],
-    "san salvario": ["san salvario", "via nizza", "via madama cristina", "via ormea"],
-    "vanchiglia": ["vanchiglia", "lungo po", "corso san maurizio"],
+class GeocodingService:
+    """Service to detect neighborhood/zone from address using OpenStreetMap Nominatim"""
     
-    # Nord
-    "barriera di milano": ["barriera di milano", "via cigna", "corso vercelli", "via bologna", "via leinì"],
-    "rebaudengo": ["rebaudengo", "corso grosseto"],
-    "falchera": ["falchera"],
-    "madonna di campagna": ["madonna di campagna", "via stradella"],
-    "lanzo": ["via lanzo"],
-    "borgata vittoria": ["borgata vittoria", "corso grosseto"],
-    "lucento": ["lucento", "via pianezza"],
-    "vallette": ["vallette", "via dei mughetti"],
-    "venaria": ["via venaria", "via venarìa"],
+    NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
     
-    # Sud  
-    "lingotto": ["lingotto", "via nizza", "corso unione sovietica"],
-    "mirafiori": ["mirafiori", "corso unione sovietica", "strada del drosso"],
-    "santa rita": ["santa rita", "via tripoli", "via gorizia"],
-    "pozzo strada": ["pozzo strada", "corso francia"],
-    "parella": ["parella", "via servais"],
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "AuctionScraper/1.0 (https://github.com/dalpozz/auction_scraper)",
+        })
+        self.cache: dict[str, str] = {}
     
-    # Est
-    "aurora": ["aurora", "corso giulio cesare", "via cuneo", "porta palazzo"],
-    "borgo po": ["borgo po", "corso moncalieri", "gran madre"],
-    "madonna del pilone": ["madonna del pilone", "corso casale"],
-    "sassi": ["sassi", "piazza sassi"],
-    "superga": ["superga", "strada di superga"],
-    
-    # Ovest
-    "san paolo": ["san paolo", "via di nanni", "via cibrario"],
-    "cenisia": ["cenisia", "via cibrario", "corso francia"],
-    "cit turin": ["cit turin", "corso francia", "via duchessa jolanda"],
-    "campidoglio": ["campidoglio", "via cibrario"],
-    "borgo san paolo": ["borgo san paolo", "via monginevro"],
-    
-    # Colline
-    "collina": ["strada del mainero", "strada comunale", "collina", "precollina"],
-    "gran madre": ["gran madre", "piazza gran madre"],
-    
-    # Altri
-    "moncalieri": ["moncalieri"],
-    "nichelino": ["nichelino"],
-    "rivoli": ["rivoli"],
-    "grugliasco": ["grugliasco"],
-    "collegno": ["collegno"],
-    "settimo": ["settimo"],
-    "san mauro": ["san mauro"],
-    "chieri": ["chieri", "riva presso chieri"],
-}
+    def get_zone(self, address: str, city: str) -> str:
+        """Get neighborhood/zone for an address using Nominatim API"""
+        cache_key = f"{address}|{city}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        
+        query = f"{address}, {city}, Italia"
+        
+        try:
+            # Respect Nominatim usage policy: max 1 request per second
+            time.sleep(1)
+            
+            response = self.session.get(
+                self.NOMINATIM_URL,
+                params={
+                    "q": query,
+                    "format": "json",
+                    "addressdetails": 1,
+                    "limit": 1,
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            
+            results = response.json()
+            if results and "address" in results[0]:
+                addr = results[0]["address"]
+                # Try different fields for neighborhood
+                zone = (
+                    addr.get("suburb") or
+                    addr.get("neighbourhood") or
+                    addr.get("quarter") or
+                    addr.get("city_district") or
+                    ""
+                )
+                self.cache[cache_key] = zone
+                return zone
+                
+        except (requests.RequestException, KeyError, IndexError):
+            pass
+        
+        self.cache[cache_key] = ""
+        return ""
 
 
 class AstaLegaleScraper:
@@ -104,6 +107,7 @@ class AstaLegaleScraper:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "application/rss+xml, application/xml, text/xml",
         })
+        self.geocoder = GeocodingService()
     
     def _build_rss_url(self) -> str:
         """Build the RSS feed URL with filters"""
@@ -145,16 +149,9 @@ class AstaLegaleScraper:
             return match.group(1).strip()
         return "Unknown"
     
-    def _detect_zone(self, address: str, description: str = "") -> str:
-        """Detect Turin neighborhood from address and description"""
-        text = f"{address} {description}".lower()
-        
-        for zone, keywords in TORINO_ZONES.items():
-            for keyword in keywords:
-                if keyword in text:
-                    return zone.title()
-        
-        return ""
+    def _detect_zone(self, address: str) -> str:
+        """Detect neighborhood from address using geocoding"""
+        return self.geocoder.get_zone(address, self.city)
     
     def _extract_address_from_title(self, title: str) -> str:
         """Extract address from title (first part before ' - Lotto')"""
@@ -202,7 +199,6 @@ class AstaLegaleScraper:
         
         # Detect neighborhood
         desc_text = description.split(" - Tipologia:")[0].strip()
-        zone = self._detect_zone(address, desc_text)
         
         if base_price is None:
             return None
@@ -210,7 +206,7 @@ class AstaLegaleScraper:
         return Auction(
             title=title,
             address=address,
-            zone=zone,
+            zone="",  # Will be populated later via geocoding
             description=desc_text,
             tribunal=tribunal,
             auction_date=auction_date,
@@ -276,6 +272,15 @@ class AstaLegaleScraper:
         all_auctions.sort(key=lambda a: a.auction_date or datetime.max)
         
         print(f"Found {len(all_auctions)} auctions matching criteria")
+        
+        # Geocode addresses to get zones
+        if all_auctions:
+            print("Detecting zones via geocoding...")
+            for auction in all_auctions:
+                zone = self._detect_zone(auction.address)
+                # Update the auction's zone (dataclass is mutable)
+                object.__setattr__(auction, 'zone', zone)
+        
         return all_auctions
     
     def print_results(self, auctions: list[Auction]) -> None:
