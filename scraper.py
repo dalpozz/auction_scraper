@@ -8,15 +8,27 @@ Uses the RSS feed endpoint for reliable data extraction.
 Uses OpenStreetMap Nominatim API for zone/neighborhood detection.
 """
 
+import argparse
 import csv
+import json
+import logging
 import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -24,40 +36,64 @@ class Auction:
     """Represents an auction listing"""
     title: str
     address: str
-    zone: str
-    description: str
-    tribunal: str
-    auction_date: Optional[datetime]
-    base_price: float
-    url: str
-    reference: str
-    property_type: str
+    zone: str = ""
+    description: str = ""
+    tribunal: str = ""
+    auction_date: Optional[datetime] = None
+    base_price: float = 0.0
+    url: str = ""
+    reference: str = ""
+    property_type: str = "Unknown"
 
 
 class GeocodingService:
     """Service to detect neighborhood/zone from address using OpenStreetMap Nominatim"""
-    
+
     NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-    
-    def __init__(self):
+
+    def __init__(self, cache_file: str = ".geocode_cache.json"):
+        self.cache_file = Path(cache_file)
         self.session = requests.Session()
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         self.session.headers.update({
             "User-Agent": "AuctionScraper/1.0 (https://github.com/dalpozz/auction_scraper)",
         })
-        self.cache: dict[str, str] = {}
-    
+        self.cache: dict[str, str] = self._load_cache()
+
+    def _load_cache(self) -> dict[str, str]:
+        """Load cache from file if it exists"""
+        if self.cache_file.exists():
+            try:
+                return json.loads(self.cache_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {}
+
+    def _save_cache(self) -> None:
+        """Save cache to file"""
+        try:
+            self.cache_file.write_text(json.dumps(self.cache, ensure_ascii=False), encoding="utf-8")
+        except OSError as e:
+            logger.warning(f"Failed to save geocode cache: {e}")
+
     def get_zone(self, address: str, city: str) -> str:
         """Get neighborhood/zone for an address using Nominatim API"""
         cache_key = f"{address}|{city}"
         if cache_key in self.cache:
             return self.cache[cache_key]
-        
+
         query = f"{address}, {city}, Italia"
-        
+
         try:
-            # Respect Nominatim usage policy: max 1 request per second
             time.sleep(1)
-            
+
             response = self.session.get(
                 self.NOMINATIM_URL,
                 params={
@@ -69,11 +105,10 @@ class GeocodingService:
                 timeout=10,
             )
             response.raise_for_status()
-            
+
             results = response.json()
             if results and "address" in results[0]:
                 addr = results[0]["address"]
-                # Try different fields for neighborhood
                 zone = (
                     addr.get("suburb") or
                     addr.get("neighbourhood") or
@@ -82,27 +117,44 @@ class GeocodingService:
                     ""
                 )
                 self.cache[cache_key] = zone
+                self._save_cache()
                 return zone
-                
-        except (requests.RequestException, KeyError, IndexError):
-            pass
-        
+
+        except requests.RequestException as e:
+            logger.warning(f"Geocoding request failed for '{query}': {e}")
+        except (KeyError, IndexError, ValueError) as e:
+            logger.warning(f"Geocoding parse error for '{query}': {e}")
+
         self.cache[cache_key] = ""
         return ""
 
 
 class AstaLegaleScraper:
     """Scraper for astalegale.net auction listings using RSS feed"""
-    
+
     BASE_URL = "https://www.astalegale.net"
     RSS_URL = "https://www.astalegale.net/Immobili/Rss"
-    
-    def __init__(self, max_budget: float = 150000, city: str = "torino", months_ahead: int = 3):
+
+    def __init__(self, max_budget: float = 150000, city: str = "torino", months_ahead: int = 3, include_undated: bool = False):
+        if max_budget <= 0:
+            raise ValueError("Budget must be a positive value")
+        if months_ahead <= 0:
+            raise ValueError("Months ahead must be a positive value")
+
         self.max_budget = max_budget
         self.city = city.lower()
         self.months_ahead = months_ahead
+        self.include_undated = include_undated
         self.cutoff_date = datetime.now() + timedelta(days=months_ahead * 30)
         self.session = requests.Session()
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "application/rss+xml, application/xml, text/xml",
@@ -219,32 +271,29 @@ class AstaLegaleScraper:
     def scrape(self) -> list[Auction]:
         """Scrape auction listings from RSS feed"""
         all_auctions = []
-        
-        print(f"Scraping apartments in {self.city.title()}")
-        print(f"Max budget: €{self.max_budget:,.2f}")
-        print(f"Auction date range: now to {self.cutoff_date.strftime('%d/%m/%Y')}")
-        print("-" * 60)
-        
+
+        logger.info(f"Scraping apartments in {self.city.title()}")
+        logger.info(f"Max budget: €{self.max_budget:,.2f}")
+        logger.info(f"Auction date range: now to {self.cutoff_date.strftime('%d/%m/%Y')}")
+
         url = self._build_rss_url()
-        print(f"Fetching RSS feed: {url}")
+        logger.info(f"Fetching RSS feed: {url}")
         
         try:
             response = self.session.get(url, timeout=30)
             response.raise_for_status()
         except requests.RequestException as e:
-            print(f"Error fetching RSS feed: {e}")
+            logger.error(f"Error fetching RSS feed: {e}")
             return []
-        
-        # Parse XML
+
         try:
             root = ET.fromstring(response.content)
         except ET.ParseError as e:
-            print(f"Error parsing RSS feed: {e}")
+            logger.error(f"Error parsing RSS feed: {e}")
             return []
-        
-        # Find all items
+
         items = root.findall(".//item")
-        print(f"Found {len(items)} total listings")
+        logger.info(f"Found {len(items)} total listings")
         
         now = datetime.now()
         
@@ -258,55 +307,58 @@ class AstaLegaleScraper:
                 continue
             
             # Apply date filters
-            if auction.auction_date:
-                # Skip past auctions
-                if auction.auction_date < now:
+            if auction.auction_date is None:
+                if not self.include_undated:
+                    logger.debug(f"Skipping auction with unknown date: {auction.address}")
                     continue
-                # Skip auctions beyond cutoff
+            else:
+                if auction.auction_date < now:
+                    logger.debug(f"Skipping past auction: {auction.address}")
+                    continue
                 if auction.auction_date > self.cutoff_date:
+                    logger.debug(f"Skipping auction beyond cutoff: {auction.address}")
                     continue
             
             all_auctions.append(auction)
         
-        # Sort by auction date
         all_auctions.sort(key=lambda a: a.auction_date or datetime.max)
-        
-        print(f"Found {len(all_auctions)} auctions matching criteria")
-        
-        # Geocode addresses to get zones
+
+        logger.info(f"Found {len(all_auctions)} auctions matching criteria")
+
         if all_auctions:
-            print("Detecting zones via geocoding...")
+            logger.info("Detecting zones via geocoding...")
             for auction in all_auctions:
                 zone = self._detect_zone(auction.address)
-                # Update the auction's zone (dataclass is mutable)
-                object.__setattr__(auction, 'zone', zone)
+                auction.zone = zone
         
         return all_auctions
     
     def print_results(self, auctions: list[Auction]) -> None:
         """Print auction results"""
-        print("\n" + "=" * 60)
-        print(f"RESULTS: {len(auctions)} apartments in {self.city.title()}")
-        print(f"Budget: up to €{self.max_budget:,.2f}")
-        print(f"Auctions within next {self.months_ahead} months")
-        print("=" * 60)
-        
+        logger.info("=" * 60)
+        logger.info(f"RESULTS: {len(auctions)} apartments in {self.city.title()}")
+        logger.info(f"Budget: up to €{self.max_budget:,.2f}")
+        logger.info(f"Auctions within next {self.months_ahead} months")
+        logger.info("=" * 60)
+
         if not auctions:
-            print("\nNo apartments matching your criteria were found.")
+            logger.info("No apartments matching your criteria were found.")
             return
-        
+
         for i, auction in enumerate(auctions, 1):
-            print(f"\n[{i}] {auction.address}")
+            logger.info(f"[{i}] {auction.address}")
             if auction.zone:
-                print(f"    Zone: {auction.zone}")
-            print(f"    Type: {auction.property_type}")
+                logger.info(f"    Zone: {auction.zone}")
+            logger.info(f"    Type: {auction.property_type}")
             if auction.auction_date:
-                print(f"    Auction Date: {auction.auction_date.strftime('%d/%m/%Y')}")
-            print(f"    Base Price: €{auction.base_price:,.2f}")
+                logger.info(f"    Auction Date: {auction.auction_date.strftime('%d/%m/%Y')}")
+            else:
+                logger.info(f"    Auction Date: TBD")
+            logger.info(f"    Base Price: €{auction.base_price:,.2f}")
             if auction.tribunal:
-                print(f"    {auction.tribunal}")
-            print(f"    Ref: {auction.reference}")
-            print(f"    URL: {auction.url}")
+                logger.info(f"    {auction.tribunal}")
+            logger.info(f"    Ref: {auction.reference}")
+            logger.info(f"    URL: {auction.url}")
     
     def save_results(self, auctions: list[Auction], filename: str = "auctions_torino.csv") -> None:
         """Save results to CSV file"""
@@ -327,33 +379,43 @@ class AstaLegaleScraper:
                     a.description,
                 ])
         
-        print(f"\nResults saved to {filename}")
+        logger.info(f"Results saved to {filename}")
 
 
 def main():
     """Main entry point"""
-    import argparse
-    
     parser = argparse.ArgumentParser(description="Scrape apartment auctions from astalegale.net")
     parser.add_argument("--budget", type=float, default=150000, help="Maximum budget in EUR (default: 150000)")
     parser.add_argument("--city", type=str, default="torino", help="City to search (default: torino)")
     parser.add_argument("--months", type=int, default=3, help="Months ahead to search (default: 3)")
     parser.add_argument("--output", type=str, default="auctions_torino.csv", help="Output CSV file (default: auctions_torino.csv)")
-    
+    parser.add_argument("--include-undated", action="store_true", help="Include auctions without scheduled date")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+
     args = parser.parse_args()
-    
-    scraper = AstaLegaleScraper(
-        max_budget=args.budget,
-        city=args.city,
-        months_ahead=args.months,
-    )
-    
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    try:
+        scraper = AstaLegaleScraper(
+            max_budget=args.budget,
+            city=args.city,
+            months_ahead=args.months,
+            include_undated=args.include_undated,
+        )
+    except ValueError as e:
+        logger.error(f"Invalid arguments: {e}")
+        return 1
+
     auctions = scraper.scrape()
     scraper.print_results(auctions)
-    
+
     if auctions:
         scraper.save_results(auctions, args.output)
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    exit(main())
